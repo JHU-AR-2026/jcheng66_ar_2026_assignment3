@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Assignment 3 - Q2 - Mazda Miata WebXR</title>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    #renderCanvas { width: 100%; height: 100%; touch-action: none; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <script>
+    const canvas = document.getElementById("renderCanvas");
+    const engine = new BABYLON.Engine(canvas, true);
+
+    const createScene = async function () {
+      const scene = new BABYLON.Scene(engine);
+
+      // Desktop preview camera
+      const camera = new BABYLON.FreeCamera(
+        "camera1", new BABYLON.Vector3(0, 5, -10), scene
+      );
+      camera.setTarget(BABYLON.Vector3.Zero());
+      camera.attachControl(canvas, true);
+
+      const light = new BABYLON.HemisphericLight(
+        "light", new BABYLON.Vector3(0, 1, 0), scene
+      );
+      light.intensity = 0.7;
+
+      // Virtual ground for controller ray picking (not physical-surface hit testing)
+      const ground = BABYLON.MeshBuilder.CreateGround(
+        "ground", { width: 10, height: 10 }, scene
+      );
+      ground.isPickable = true;
+      scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+
+      let modelTemplate = null;
+      let latestModel = null;
+
+      // Load the local GLB once; its hidden hierarchy serves as the spawn template.
+      const result = await BABYLON.SceneLoader.ImportMeshAsync(
+        "", "./assets/", "classic_mazda_miata_cabriolet__low_poly.glb", scene
+      );
+      modelTemplate = new BABYLON.TransformNode("miataTemplate", scene);
+      result.meshes.forEach(mesh => {
+        if (!mesh.parent) mesh.parent = modelTemplate;
+      });
+      modelTemplate.setEnabled(false);
+      console.log("Miata loaded successfully!");
+
+      function spawnModel(position) {
+        if (!modelTemplate) return;
+        const newModel = modelTemplate.clone("miata_" + Date.now());
+        newModel.setEnabled(true);
+        newModel.position.copyFrom(position);
+        newModel.scaling.setAll(0.3);
+        newModel.metadata = {
+          initialPosition: newModel.position.clone(),
+          initialRotation: newModel.rotation.clone(),
+          initialScaling: newModel.scaling.clone()
+        };
+        latestModel = newModel;
+        console.log("Miata spawned!");
+      }
+
+      const xr = await scene.createDefaultXRExperienceAsync({
+        uiOptions: {
+          sessionMode: "immersive-ar",
+          referenceSpaceType: "local-floor"
+        },
+        disableTeleportation: true
+      });
+
+      xr.input.onControllerAddedObservable.add(controller => {
+        // Left controller: Y-axis rotation and X-button reset
+        if (controller.inputSource.handedness === "left") {
+          controller.onMotionControllerInitObservable.add(motionController => {
+            const leftThumbstick = motionController.getComponent("xr-standard-thumbstick");
+            const buttonX = motionController.getComponent("x-button");
+
+            if (leftThumbstick) {
+              const rotationSpeed = 1.5;
+              scene.onBeforeRenderObservable.add(() => {
+                if (!latestModel || !leftThumbstick.axes) return;
+                const x = leftThumbstick.axes.x;
+                if (Math.abs(x) < 0.1) return;
+                const dt = engine.getDeltaTime() / 1000;
+                latestModel.rotation.y += x * rotationSpeed * dt;
+              });
+            }
+
+            if (buttonX) {
+              buttonX.onButtonStateChangedObservable.add(() => {
+                if (!latestModel || !buttonX.changes.pressed || !buttonX.pressed) return;
+                latestModel.position.copyFrom(latestModel.metadata.initialPosition);
+                latestModel.rotation.copyFrom(latestModel.metadata.initialRotation);
+                latestModel.scaling.copyFrom(latestModel.metadata.initialScaling);
+                console.log("Miata reset!");
+              });
+            }
+          });
+        }
+
+        // Right controller: spawn, move, and scale
+        if (controller.inputSource.handedness !== "right") return;
+        controller.onMotionControllerInitObservable.add(motionController => {
+          const trigger = motionController.getComponent("xr-standard-trigger");
+          const thumbstick = motionController.getComponent("xr-standard-thumbstick");
+          const buttonA = motionController.getComponent("a-button");
+          const buttonB = motionController.getComponent("b-button");
+
+          if (trigger) {
+            trigger.onButtonStateChangedObservable.add(() => {
+              if (!trigger.changes.pressed || !trigger.pressed) return;
+              const ray = new BABYLON.Ray(
+                BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 100
+              );
+              controller.getWorldPointerRayToRef(ray);
+              const hit = scene.pickWithRay(ray, mesh => mesh === ground);
+              if (hit && hit.hit && hit.pickedPoint) spawnModel(hit.pickedPoint);
+            });
+          }
+
+          if (thumbstick) {
+            const movementSpeed = 1.0;
+            scene.onBeforeRenderObservable.add(() => {
+              if (!latestModel || !thumbstick.axes) return;
+              const axes = thumbstick.axes;
+              const x = Math.abs(axes.x) > 0.1 ? axes.x : 0;
+              const y = Math.abs(axes.y) > 0.1 ? axes.y : 0;
+              const dt = engine.getDeltaTime() / 1000;
+              latestModel.position.x += x * movementSpeed * dt;
+              latestModel.position.z -= y * movementSpeed * dt;
+            });
+          }
+
+          if (buttonA) {
+            buttonA.onButtonStateChangedObservable.add(() => {
+              if (latestModel && buttonA.changes.pressed && buttonA.pressed)
+                latestModel.scaling.scaleInPlace(1.1);
+            });
+          }
+          if (buttonB) {
+            buttonB.onButtonStateChangedObservable.add(() => {
+              if (latestModel && buttonB.changes.pressed && buttonB.pressed)
+                latestModel.scaling.scaleInPlace(0.9);
+            });
+          }
+        });
+      });
+
+      return scene;
+    };
+
+    createScene().then(scene => {
+      engine.runRenderLoop(() => scene.render());
+    }).catch(error => {
+      console.error("Scene initialization failed:", error);
+    });
+    window.addEventListener("resize", () => engine.resize());
+  </script>
+</body>
+</html>
